@@ -6,15 +6,17 @@ Credentials come from environment variables or Kaggle Secrets, never from the co
 """
 
 import os
+import re
 import time
 
 
 def chat_text(response: dict) -> str:
     """Reasoning models (gpt-oss) return content as a list of blocks; keep only the text blocks."""
     content = response["choices"][0]["message"]["content"]
-    if isinstance(content, str):
-        return content
-    return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    if not isinstance(content, str):
+        content = "".join(b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text")
+    # Some reasoning models (Qwen3.5) put their reasoning inline as <think>...</think>; keep only the answer.
+    return re.sub(r"<think>.*?(</think>|$)", "", content, flags=re.S).strip()
 
 
 def endpoint(host: str, model: str):
@@ -42,7 +44,8 @@ def make_databricks_llm(model: str = "databricks-gpt-oss-120b", host: str = None
                 resp = requests.post(url, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=300)
                 if resp.status_code == 429 or resp.status_code >= 500:
                     raise RuntimeError(f"HTTP {resp.status_code}")
-                resp.raise_for_status()
+                if resp.status_code >= 400:  # show Databricks' own explanation, e.g. a deprecated model
+                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
                 return chat_text(resp.json())
             except Exception:
                 if attempt == retries - 1:
