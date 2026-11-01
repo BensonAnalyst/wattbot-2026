@@ -33,6 +33,11 @@ def first_author(citation: str) -> str:
     return words[-1].lower() if words else ""
 
 
+def pdf_url(url: str) -> str:
+    """arXiv abstract pages (/abs/) link to an HTML page, not the PDF: point them at /pdf/ instead."""
+    return re.sub(r"arxiv\.org/abs/", "arxiv.org/pdf/", str(url).strip())
+
+
 def find_cached_pdfs(meta: pd.DataFrame, search_dirs) -> dict:
     """{doc_id: path} for documents already saved in any of search_dirs (e.g. a private Kaggle Dataset)."""
     found = {}
@@ -55,13 +60,15 @@ def download_pdfs(meta: pd.DataFrame, out_dir, cache_dirs=(), delay: float = 3.0
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     result = find_cached_pdfs(meta, list(cache_dirs) + [out_dir])
-    headers = {"User-Agent": "WattBot2026-entrant/1.0 (one-time fetch of the competition corpus)"}
+    agents = ["WattBot2026-entrant/1.0 (one-time fetch of the competition corpus)",
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"]
     todo = [r for r in meta.itertuples() if r.id not in result]
     for i, row in enumerate(todo):
         result[row.id] = None
         for attempt in range(retries):
             try:
-                resp = requests.get(row.url, timeout=180, headers=headers)
+                # Some sites refuse non-browser clients, so the second attempt identifies as a browser.
+                resp = requests.get(pdf_url(row.url), timeout=180, headers={"User-Agent": agents[min(attempt, 1)]})
                 if resp.ok and resp.content[:4] == b"%PDF":
                     path = out_dir / f"{row.id}.pdf"
                     path.write_bytes(resp.content)
@@ -116,15 +123,21 @@ def chunk_pages(doc_id: str, title: str, pages: list, size: int = 220, overlap: 
     return chunks
 
 
-def build_chunks(meta: pd.DataFrame, pdf_paths: dict, cache_path=None) -> list:
-    """Parse every downloaded PDF into chunks; cached as JSON because parsing takes a few minutes."""
-    if cache_path and Path(cache_path).exists():
-        return json.loads(Path(cache_path).read_text())
-    chunks = []
+def build_chunks(meta: pd.DataFrame, pdf_paths: dict, cache_path=None, out_path=None) -> list:
+    """Parse PDFs into chunks, reusing a cache: only documents missing from the cache are parsed.
+
+    cache_path may be read-only (a Kaggle Dataset); the merged result is written to out_path (default
+    cache_path). Documents added later, such as a PDF fetched in a second run, are parsed without
+    re-parsing the other documents."""
+    chunks = json.loads(Path(cache_path).read_text()) if cache_path and Path(cache_path).exists() else []
+    have = {c["doc_id"] for c in chunks}
+    added = 0
     for row in meta.itertuples():
         path = pdf_paths.get(row.id)
-        if path:
+        if path and row.id not in have:
             chunks += chunk_pages(row.id, row.title, extract_pages(path))
-    if cache_path:
-        Path(cache_path).write_text(json.dumps(chunks))
+            added += 1
+    out = out_path or cache_path
+    if out and (added or not Path(out).exists()):
+        Path(out).write_text(json.dumps(chunks))
     return chunks

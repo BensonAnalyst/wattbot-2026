@@ -248,3 +248,22 @@ def test_download_reuses_cached_copies(tmp_path):
     (tmp_path / "a2020.pdf").write_bytes(b"%PDF" + b"x" * 20_000)
     (tmp_path / "b2021.pdf").write_bytes(b"%PDF")  # too small: a failed download, fetch again
     assert set(find_cached_pdfs(meta, [tmp_path])) == {"a2020"}
+
+
+def test_arxiv_abstract_links_point_to_pdf():
+    from wattbot.docs import pdf_url
+    assert pdf_url("https://arxiv.org/abs/2601.19311v2") == "https://arxiv.org/pdf/2601.19311v2"
+    assert pdf_url("https://www.gao.gov/assets/gao-25-107172.pdf") == "https://www.gao.gov/assets/gao-25-107172.pdf"
+
+
+def test_chunk_cache_parses_only_new_documents(tmp_path, monkeypatch):
+    import wattbot.docs as docs
+    parsed = []
+    monkeypatch.setattr(docs, "extract_pages", lambda p: parsed.append(p) or [{"page": 1, "text": "some words here"}])
+    meta = pd.DataFrame([{"id": "a2020", "title": "A"}, {"id": "b2021", "title": "B"}])
+    first = docs.build_chunks(meta, {"a2020": "a.pdf", "b2021": None}, cache_path=tmp_path / "c.json")
+    assert {c["doc_id"] for c in first} == {"a2020"} and parsed == ["a.pdf"]
+    out = tmp_path / "merged.json"  # the first cache acts as a read-only dataset
+    second = docs.build_chunks(meta, {"a2020": "a.pdf", "b2021": "b.pdf"}, cache_path=tmp_path / "c.json", out_path=out)
+    assert {c["doc_id"] for c in second} == {"a2020", "b2021"} and parsed == ["a.pdf", "b.pdf"]
+    assert out.exists()
