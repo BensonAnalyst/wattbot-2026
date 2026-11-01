@@ -305,3 +305,39 @@ def test_cache_merges_saved_dataset(tmp_path):
     (tmp_path / "in" / "ds" / "llm_cache.json").write_text(json.dumps({"a": "old", "b": "old"}))
     (tmp_path / "c.json").write_text(json.dumps({"b": "new"}))
     assert load_cache(tmp_path / "c.json", [tmp_path / "in"]) == {"a": "old", "b": "new"}
+
+
+def test_think_tags_are_removed():
+    from wattbot.llm import chat_text
+    r = {"choices": [{"message": {"content": "<think>try {a: 1}</think>\n{\"answer_value\": \"4.3\"}"}}]}
+    assert chat_text(r) == '{"answer_value": "4.3"}'
+    blocks = {"choices": [{"message": {"content": [{"type": "reasoning", "text": "x"}, {"type": "text", "text": "ok"}]}}]}
+    assert chat_text(blocks) == "ok"
+
+
+def test_unreadable_replies_are_retried_not_cached():
+    from wattbot.answer import ask
+    replies = iter(["cut off {\"answer", json.dumps({"answerable": True, "answer_value": "4.3", "ref_ids": ["a"]})])
+    cache = {}
+    reply = ask({"question": "q", "answer_unit": "MWh"}, [], lambda m, **k: next(replies), cache, "m")
+    assert reply["answer_value"] == "4.3" and len(cache) == 1
+    stale = {}
+    from wattbot.answer import build_messages, cache_key
+    stale[cache_key(build_messages("q", "MWh", []), "m")] = "garbage"
+    reply = ask({"question": "q", "answer_unit": "MWh"}, [], lambda m, **k: json.dumps({"answer_value": "1"}), stale, "m")
+    assert reply == {"answer_value": "1"}  # a bad cached reply is replaced
+
+
+def test_rate_limit_waits_and_retries(monkeypatch):
+    import wattbot.llm as L
+    class R:
+        def __init__(self, code): self.status_code, self.ok, self.headers, self.text = code, code == 200, {}, "x"
+        def json(self): return {"choices": [{"message": {"content": "ready"}}]}
+    seq = iter([R(429), R(429), R(200)])
+    monkeypatch.setattr("requests.post", lambda *a, **k: next(seq))
+    sleeps = []
+    monkeypatch.setattr(L.time, "sleep", sleeps.append)
+    assert L.make_databricks_llm("m", host="h", token="t")([]) == "ready" and sleeps == [15, 30]
+    monkeypatch.setattr("requests.post", lambda *a, **k: R(400))
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        L.make_databricks_llm("m", host="h", token="t")([])  # not retried

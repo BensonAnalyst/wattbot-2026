@@ -200,9 +200,16 @@ def ask(q: dict, chunks: list, llm_fn, cache: dict, model: str, vote: int = 0):
     Every reply is cached under the prompt, model and vote number, so re-runs cost nothing."""
     messages = build_messages(q["question"], q.get("answer_unit"), chunks)
     key = cache_key(messages, model) + ("" if vote == 0 else f"-v{vote}")
-    if key not in cache:
-        cache[key] = llm_fn(messages) if vote == 0 else llm_fn(messages, temperature=0.7)
-    return parse_reply(cache[key])
+    if key in cache and parse_reply(cache[key]) is not None:
+        return parse_reply(cache[key])
+    # Ask (again): an unreadable reply, e.g. one cut off mid-JSON, is never kept in the cache.
+    for _ in range(2):
+        raw = llm_fn(messages) if vote == 0 else llm_fn(messages, temperature=0.7)
+        reply = parse_reply(raw)
+        if reply is not None:
+            cache[key] = raw
+            return reply
+    return None
 
 
 def _vote_key(value: str):

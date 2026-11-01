@@ -30,7 +30,7 @@ def endpoint(host: str, model: str):
 
 
 def make_databricks_llm(model: str = "databricks-gpt-oss-120b", host: str = None, token: str = None,
-                        max_tokens: int = 4000, retries: int = 5):
+                        max_tokens: int = 8000, retries: int = 8):
     import requests
 
     host = (host or os.environ["DATABRICKS_HOST"]).rstrip("/")
@@ -42,14 +42,19 @@ def make_databricks_llm(model: str = "databricks-gpt-oss-120b", host: str = None
         for attempt in range(retries):
             try:
                 resp = requests.post(url, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=300)
-                if resp.status_code == 429 or resp.status_code >= 500:
-                    raise RuntimeError(f"HTTP {resp.status_code}")
-                if resp.status_code >= 400:  # show Databricks' own explanation, e.g. a deprecated model
-                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+            except requests.RequestException:
+                resp = None
+            if resp is not None and resp.ok:
                 return chat_text(resp.json())
-            except Exception:
-                if attempt == retries - 1:
-                    raise
-                time.sleep(5 * 2 ** attempt)
+            code = resp.status_code if resp is not None else 0
+            if code and code < 500 and code != 429:  # a request error (e.g. deprecated model): retrying won't help
+                raise RuntimeError(f"HTTP {code}: {resp.text[:300]}")
+            if attempt == retries - 1:
+                raise RuntimeError(f"HTTP {code}: gave up after {retries} attempts")
+            # Rate limited (429) or a server error: wait, longer each time, or as long as the server asks.
+            wait = 15 * 2 ** min(attempt, 4)
+            if resp is not None and resp.headers.get("Retry-After", "").isdigit():
+                wait = max(wait, int(resp.headers["Retry-After"]))
+            time.sleep(wait)
 
     return llm

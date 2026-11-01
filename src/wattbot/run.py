@@ -42,7 +42,7 @@ def save_cache(cache: dict, path):
 
 
 def answer_all(questions: pd.DataFrame, retriever, llm_fn, urls: dict, cache_path, model: str,
-               k: int = 8, k_retry: int = 20, threads: int = 4, n_votes: int = 1):
+               k: int = 8, k_retry: int = 20, threads: int = 2, n_votes: int = 1):
     """Answer every question. Returns (submission DataFrame, {id: retrieved chunks}, set of retried ids).
 
     Each question gets the top k excerpts; if the model finds no answer there, it retries once with k_retry.
