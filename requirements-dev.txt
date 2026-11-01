@@ -3,3 +3,4 @@ numpy
 pdfplumber
 reportlab
 pytest
+requests
