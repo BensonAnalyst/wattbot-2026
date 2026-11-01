@@ -31,9 +31,11 @@ Rules:
      needed (5.439 million liters -> 5439000 when the unit is liters). A value stated in a document is copied
      exactly; a value you calculate is rounded to 3 significant figures (312.5 / 24 = 13.02 -> 13).
    - A range the question asks for: [low,high]. Two separate values the question asks for: (first,second).
-   - QUESTION TYPE true/false: 1 if the excerpts support the statement, 0 if they contradict it.
-   - QUESTION TYPE name: the name or term itself, in the document's wording (never 1 or 0). If the question
-     asks for two names, write (first,second).
+   - QUESTION TYPE true/false (including yes/no questions): 1 if the excerpts support the statement or the
+     answer is yes, 0 if they contradict it or the answer is no.
+   - QUESTION TYPE name: the shortest exact name or term as the document writes it, without words the
+     question already implies ("real income effect", not "real income"; "net zero", not "net zero
+     commitments"; "induction", not "induction impacts"). Never 1 or 0. Two names: (first,second).
 5. Arithmetic on numbers from the excerpts is allowed, including combining two documents. Show it in
    "explanation".
 6. ref_ids: only the document IDs whose excerpts you actually took a number or statement from. Extra
@@ -53,10 +55,24 @@ def format_sources(chunks: list) -> str:
     return "\n\n".join(f"[{c['doc_id']}, page {c['page']}]\n{c['text']}" for c in chunks)
 
 
+_YES_NO = re.compile(r"^(is|are|was|were|does|do|did|can|could|has|have|had|will|would|should)\b", re.I)
+
+
 def question_type(question: str, unit: str) -> str:
-    if str(question).strip().lower().startswith("true or false"):
+    """number, true/false or name. Yes/no questions ("Was the relationship ... linear?") are true/false too:
+    the gold answer is 1 or 0 whether or not the question starts with "True or False"."""
+    q = str(question).strip()
+    no_unit = not unit or str(unit).strip() == BLANK
+    if "true or false" in q.lower():  # often after a setup paragraph: "... True or False: the two findings ..."
         return "true/false"
-    return "name" if not unit or str(unit).strip() == BLANK else "number"
+    if no_unit and not re.match(r"^(what|which|who|whom|whose|where|when|why|how|name|list)\b", q, re.I):
+        # the yes/no verb may follow a lead-in clause: "In experiments measuring X, was the relationship ...?"
+        parts = re.split(r"[,.:;]\s+", q)
+        starts = [i for i, c in enumerate(parts) if _YES_NO.match(c.strip())]
+        # "...scale linearly, sublinearly, or superlinearly?" offers a choice, so it is a name question
+        if starts and not re.search(r"\bor\b", " ".join(parts[starts[-1]:]), re.I):
+            return "true/false"
+    return "name" if no_unit else "number"
 
 
 def build_messages(question: str, unit: str, chunks: list) -> list:
@@ -150,6 +166,8 @@ def typed_value(reply: dict, question: str, unit: str) -> str:
         return value if value in ("0", "1") else BLANK
     if qtype == "name" and value in ("0", "1", BLANK):  # the model wrote a flag instead of the name
         name = str(reply.get("answer") or "").strip().rstrip(".")
+        if normalise_value(re.sub(r"\W.*", "", name), unit) in ("0", "1"):  # the answer itself is yes/no
+            return value if value != BLANK else normalise_value(re.sub(r"\W.*", "", name), unit)
         return name or BLANK
     return value
 

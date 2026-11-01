@@ -267,3 +267,23 @@ def test_chunk_cache_parses_only_new_documents(tmp_path, monkeypatch):
     second = docs.build_chunks(meta, {"a2020": "a.pdf", "b2021": "b.pdf"}, cache_path=tmp_path / "c.json", out_path=out)
     assert {c["doc_id"] for c in second} == {"a2020", "b2021"} and parsed == ["a.pdf", "b.pdf"]
     assert out.exists()
+
+
+def test_yes_no_questions_are_boolean():
+    from wattbot.answer import question_type, typed_value
+    yn = "In experiments measuring inference, was the relationship between runtime and energy nearly linear?"
+    assert question_type(yn, "is_blank") == "true/false"
+    assert question_type("A popular claim puts a chat query at ten times a search. Is that claim well supported?",
+                         "is_blank") == "true/false"
+    assert question_type("Which preemption mechanism consumes less energy, Recomputation or Swapping?",
+                         "is_blank") == "name"
+    assert question_type("Does the energy cost scale linearly or sublinearly?", "is_blank") == "name"  # a choice
+    assert question_type("As counts grow, does the cost scale linearly, sublinearly, or superlinearly?",
+                         "is_blank") == "name"
+    assert question_type("Is the PUE above 1.5, in PUE?", "PUE") == "number"
+    assert question_type("One study says X. Another says Y. True or False: the findings contradict.", "is_blank") \
+        == "true/false"
+    # v1 bug: a correct 0 was replaced by the answer text "False"
+    assert typed_value({"answer_value": "0", "answer": "False"}, yn, "is_blank") == "0"
+    assert typed_value({"answer_value": "Yes", "answer": "Yes, nearly linear."}, yn, "is_blank") == "1"
+    assert typed_value({"answer_value": "0", "answer": "False."}, "What term is used?", "is_blank") == "0"
