@@ -38,15 +38,20 @@ def pdf_url(url: str) -> str:
     return re.sub(r"arxiv\.org/abs/", "arxiv.org/pdf/", str(url).strip())
 
 
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 def find_cached_pdfs(meta: pd.DataFrame, search_dirs) -> dict:
-    """{doc_id: path} for documents already saved in any of search_dirs (e.g. a private Kaggle Dataset)."""
-    found = {}
+    """{doc_id: path} for documents already saved in any of search_dirs (e.g. a private Kaggle Dataset).
+
+    Names are matched ignoring case and punctuation, because uploads get renamed (agl2025.pdf -> agl_2025.pdf)."""
+    by_key = {}
     for d in search_dirs:
-        for row in meta.itertuples():
-            p = Path(d) / f"{row.id}.pdf"
-            if row.id not in found and p.exists() and p.stat().st_size > 10_000:
-                found[row.id] = p
-    return found
+        for p in Path(d).glob("*.pdf"):
+            if p.stat().st_size > 10_000:
+                by_key.setdefault(_key(p.stem), p)
+    return {row.id: by_key[_key(row.id)] for row in meta.itertuples() if _key(row.id) in by_key}
 
 
 def download_pdfs(meta: pd.DataFrame, out_dir, cache_dirs=(), delay: float = 3.0, retries: int = 2) -> dict:

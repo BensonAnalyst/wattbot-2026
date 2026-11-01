@@ -17,16 +17,26 @@ def chat_text(response: dict) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
 
 
+def endpoint(host: str, model: str):
+    """(url, extra body fields) for a model.
+
+    Unity Gateway models are named system.ai.<name> and share one OpenAI-style URL with the model in the body;
+    older foundation models (databricks-gpt-oss-120b) keep a per-endpoint URL."""
+    if model.startswith("system.ai."):
+        return f"{host}/ai-gateway/mlflow/v1/chat/completions", {"model": model}
+    return f"{host}/serving-endpoints/{model}/invocations", {}
+
+
 def make_databricks_llm(model: str = "databricks-gpt-oss-120b", host: str = None, token: str = None,
                         max_tokens: int = 4000, retries: int = 5):
     import requests
 
     host = (host or os.environ["DATABRICKS_HOST"]).rstrip("/")
     token = token or os.environ["DATABRICKS_TOKEN"]
-    url = f"{host}/serving-endpoints/{model}/invocations"
+    url, extra = endpoint(host, model)
 
     def llm(messages, temperature: float = 0.0):
-        body = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+        body = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature, **extra}
         for attempt in range(retries):
             try:
                 resp = requests.post(url, json=body, headers={"Authorization": f"Bearer {token}"}, timeout=300)

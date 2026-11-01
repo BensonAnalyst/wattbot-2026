@@ -248,6 +248,8 @@ def test_download_reuses_cached_copies(tmp_path):
     (tmp_path / "a2020.pdf").write_bytes(b"%PDF" + b"x" * 20_000)
     (tmp_path / "b2021.pdf").write_bytes(b"%PDF")  # too small: a failed download, fetch again
     assert set(find_cached_pdfs(meta, [tmp_path])) == {"a2020"}
+    (tmp_path / "B_2021.pdf").write_bytes(b"%PDF" + b"x" * 20_000)  # renamed on upload
+    assert set(find_cached_pdfs(meta, [tmp_path])) == {"a2020", "b2021"}
 
 
 def test_arxiv_abstract_links_point_to_pdf():
@@ -287,3 +289,19 @@ def test_yes_no_questions_are_boolean():
     assert typed_value({"answer_value": "0", "answer": "False"}, yn, "is_blank") == "0"
     assert typed_value({"answer_value": "Yes", "answer": "Yes, nearly linear."}, yn, "is_blank") == "1"
     assert typed_value({"answer_value": "0", "answer": "False."}, "What term is used?", "is_blank") == "0"
+
+
+def test_gateway_and_legacy_endpoints():
+    from wattbot.llm import endpoint
+    assert endpoint("https://h", "system.ai.deepseek-v4-flash-0731") == \
+        ("https://h/ai-gateway/mlflow/v1/chat/completions", {"model": "system.ai.deepseek-v4-flash-0731"})
+    assert endpoint("https://h", "databricks-gpt-oss-120b") == \
+        ("https://h/serving-endpoints/databricks-gpt-oss-120b/invocations", {})
+
+
+def test_cache_merges_saved_dataset(tmp_path):
+    from wattbot.run import load_cache
+    (tmp_path / "in" / "ds").mkdir(parents=True)
+    (tmp_path / "in" / "ds" / "llm_cache.json").write_text(json.dumps({"a": "old", "b": "old"}))
+    (tmp_path / "c.json").write_text(json.dumps({"b": "new"}))
+    assert load_cache(tmp_path / "c.json", [tmp_path / "in"]) == {"a": "old", "b": "new"}

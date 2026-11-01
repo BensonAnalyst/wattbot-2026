@@ -24,9 +24,17 @@ def make_embedder(model_name: str = "BAAI/bge-small-en-v1.5", device: str = None
     return embed
 
 
-def load_cache(path) -> dict:
+def load_cache(path, input_dirs=("/kaggle/input",)) -> dict:
+    """The reply cache at path, merged with any llm_cache.json saved as a dataset under input_dirs,
+    so a new session reuses earlier answers instead of paying for them again."""
+    cache = {}
+    for d in input_dirs:
+        for f in sorted(Path(d).glob("**/llm_cache.json")) if Path(d).exists() else []:
+            cache.update(json.loads(f.read_text()))
     p = Path(path)
-    return json.loads(p.read_text()) if p.exists() else {}
+    if p.exists():
+        cache.update(json.loads(p.read_text()))
+    return cache
 
 
 def save_cache(cache: dict, path):
