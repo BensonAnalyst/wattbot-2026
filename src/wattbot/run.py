@@ -42,7 +42,7 @@ def save_cache(cache: dict, path):
 
 
 def answer_all(questions: pd.DataFrame, retriever, llm_fn, urls: dict, cache_path, model: str,
-               k: int = 8, k_retry: int = 20, threads: int = 2, n_votes: int = 1):
+               k: int = 8, k_retry: int = 20, threads: int = 2, n_votes: int = 1, requery: bool = True):
     """Answer every question. Returns (submission DataFrame, {id: retrieved chunks}, set of retried ids).
 
     Each question gets the top k excerpts; if the model finds no answer there, it retries once with k_retry.
@@ -54,11 +54,21 @@ def answer_all(questions: pd.DataFrame, retriever, llm_fn, urls: dict, cache_pat
     retrieved = {q["id"]: retriever.search(q["question"], k=max(k, k_retry or 0)) for q in records}
     retried = set()
 
+    def requery_fn(question, queries, k_each=6, k_total=20):
+        """Excerpts for the rephrased queries plus the original question, without duplicates."""
+        seen, out = set(), []
+        for s in list(queries) + [question]:
+            for c in retriever.search(s, k=k_each):
+                if c["chunk_id"] not in seen:
+                    seen.add(c["chunk_id"])
+                    out.append(c)
+        return out[:k_total] if queries else []
+
     def one(q):
         wide = retrieved[q["id"]]
         try:
             row, used_retry = answer_question(q, wide[:k], llm_fn, urls, cache, model, retry_chunks=wide,
-                                              n_votes=n_votes)
+                                              n_votes=n_votes, requery_fn=requery_fn if requery else None)
             if used_retry:
                 retried.add(q["id"])
             return row

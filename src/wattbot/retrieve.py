@@ -51,33 +51,80 @@ def author_hints(question: str, authors: dict) -> set:
     return named
 
 
-def rrf(rankings: list, k: int = 60) -> dict:
+def rrf(rankings: list, k: int = 60, weights: list = None) -> dict:
+    """Reciprocal rank fusion; weights scale each ranking's contribution (e.g. favour keyword search)."""
     fused = defaultdict(float)
-    for ranking in rankings:
+    for ranking, w in zip(rankings, weights or [1.0] * len(rankings)):
         for rank, idx in enumerate(ranking):
-            fused[idx] += 1 / (k + rank + 1)
+            fused[idx] += w / (k + rank + 1)
     return fused
 
 
 class Retriever:
-    def __init__(self, chunks: list, authors: dict, embed_fn=None):
-        """embed_fn(list[str]) -> list of unit-normalised vectors, or None for BM25 only."""
+    def __init__(self, chunks: list, authors: dict, embed_fn=None, bm25_weight: float = 1.0,
+                 dense_weight: float = 1.0, max_per_doc: int = None):
+        """embed_fn(list[str]) -> list of unit-normalised vectors, or None for BM25 only.
+
+        bm25_weight / dense_weight: how much each ranking counts in the fusion (dense_weight 0 = keyword only).
+        max_per_doc: at most this many excerpts from one document, so a question that needs two papers is
+        not crowded out by eight excerpts of the first one."""
         self.chunks, self.authors, self.embed_fn = chunks, authors, embed_fn
         self.bm25 = BM25([c["search_text"] for c in chunks])
         self.vectors = np.asarray(embed_fn([c["search_text"] for c in chunks])) if embed_fn else None
+        self._qvec = {}
+        self.configure(bm25_weight=bm25_weight, dense_weight=dense_weight, max_per_doc=max_per_doc)
 
-    def search(self, question: str, k: int = 8, pool: int = 50) -> list:
+    def configure(self, bm25_weight=1.0, dense_weight=1.0, max_per_doc=None):
+        self.bm25_weight, self.dense_weight, self.max_per_doc = bm25_weight, dense_weight, max_per_doc
+        return self
+
+    def _query_vector(self, question):
+        if question not in self._qvec:
+            self._qvec[question] = np.asarray(self.embed_fn([question])[0])
+        return self._qvec[question]
+
+    def search(self, question: str, k: int = 8, pool: int = 50, **override) -> list:
+        bw = override.get("bm25_weight", self.bm25_weight)
+        dw = override.get("dense_weight", self.dense_weight)
+        cap = override.get("max_per_doc", self.max_per_doc)
         allowed = author_hints(question, self.authors)
         idx = [i for i, c in enumerate(self.chunks) if not allowed or c["doc_id"] in allowed]
         bm = self.bm25.scores(question)
         rankings = [[i for i in sorted(idx, key=lambda i: -bm[i])[:pool] if bm[i] > 0]]
-        if self.vectors is not None:
-            q = np.asarray(self.embed_fn([question])[0])
-            sims = self.vectors[idx] @ q
+        weights = [bw]
+        if self.vectors is not None and dw > 0:
+            sims = self.vectors[idx] @ self._query_vector(question)
             rankings.append([idx[j] for j in np.argsort(-sims)[:pool]])
-        fused = rrf(rankings)
-        best = sorted(fused, key=lambda i: -fused[i])[:k]
+            weights.append(dw)
+        fused = rrf(rankings, weights=weights)
+        best, per_doc = [], defaultdict(int)
+        for i in sorted(fused, key=lambda i: -fused[i]):
+            doc = self.chunks[i]["doc_id"]
+            if cap and per_doc[doc] >= cap:
+                continue
+            per_doc[doc] += 1
+            best.append(i)
+            if len(best) == k:
+                break
         return [{**self.chunks[i], "score": round(fused[i], 5)} for i in best]
+
+
+def tune(retriever, questions, k: int, grid: list, parse_refs) -> "pd.DataFrame":
+    """Document recall@k on answerable training questions for each retrieval setting (no LLM calls)."""
+    import pandas as pd
+
+    rows = []
+    ans = questions[questions["answer_value"] != "is_blank"]
+    cross = (ans["CrossPaper"].astype(str) == "1").values if "CrossPaper" in ans else None
+    for cfg in grid:
+        rec = [doc_recall(retriever.search(q.question, k=k, **cfg), parse_refs(q.ref_id)) for q in ans.itertuples()]
+        row = {**cfg, "recall": round(float(np.mean(rec)), 3)}
+        if cross is not None and cross.any():
+            row["recall_crosspaper"] = round(float(np.mean([r for r, c in zip(rec, cross) if c])), 3)
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    keys = [c for c in ("recall", "recall_crosspaper") if c in out]
+    return out.sort_values(keys, ascending=False, kind="stable").reset_index(drop=True)
 
 
 def doc_recall(retrieved: list, truth_refs: set) -> float:

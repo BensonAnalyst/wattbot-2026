@@ -36,8 +36,9 @@ Rules:
    - QUESTION TYPE name: the shortest exact name or term as the document writes it, without words the
      question already implies ("real income effect", not "real income"; "net zero", not "net zero
      commitments"; "induction", not "induction impacts"). Never 1 or 0. Two names: (first,second).
-5. Arithmetic on numbers from the excerpts is allowed, including combining two documents. Show it in
-   "explanation".
+5. Arithmetic on numbers from the excerpts is allowed, including combining two documents. For a calculation,
+   in "explanation" first list each input number with its unit and source, convert units, then compute step by
+   step and check the result before writing answer_value.
 6. ref_ids: only the document IDs whose excerpts you actually took a number or statement from. Extra
    documents lower the score; usually this is one document, two when you combined two.
 7. supporting_materials: a short verbatim quote (or "Table N" / "Figure N") from those excerpts.
@@ -46,9 +47,19 @@ QUESTION: {question}
 QUESTION TYPE: {qtype}
 REQUIRED UNIT FOR answer_value: {unit}
 
-Reply with JSON only:
-{{"answerable": true, "answer": "short natural-language answer with unit", "answer_value": "...",
-"ref_ids": ["docid"], "supporting_materials": "...", "explanation": "..."}}"""
+Reply with JSON only, writing "explanation" first:
+{{"answerable": true, "explanation": "...", "answer": "short natural-language answer with unit",
+"answer_value": "...", "ref_ids": ["docid"], "supporting_materials": "..."}}"""
+
+QUERY_PROMPT = """A search over research papers and reports about the energy, water and carbon footprint of AI and data
+centers did not find the evidence needed for this question:
+
+{question}
+
+Write 3 different short keyword search queries that would find the passage holding the answer. Use the specific
+terms a paper would print: model or system names, metrics, units, places, years, and synonyms (e.g. "PUE",
+"water withdrawal", "tCO2e"). If the question needs two facts, give each fact its own query.
+Reply with a JSON list of strings only."""
 
 
 def format_sources(chunks: list) -> str:
@@ -255,8 +266,23 @@ def _refs(field: str) -> list:
     return re.findall(r"'([^']+)'", str(field))
 
 
+def search_queries(question: str, llm_fn, cache: dict, model: str) -> list:
+    """Up to 3 rephrased keyword queries for a question the first search failed on (cached like answers)."""
+    messages = [{"role": "user", "content": QUERY_PROMPT.format(question=question.strip())}]
+    key = cache_key(messages, model) + "-q"
+    if key not in cache:
+        cache[key] = llm_fn(messages)
+    raw = re.sub(r"```(?:json)?", "", cache[key] or "")
+    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    try:
+        items = json.loads(match.group(0)) if match else []
+    except json.JSONDecodeError:
+        items = []
+    return [str(x).strip() for x in items if str(x).strip()][:3]
+
+
 def answer_question(q: dict, chunks: list, llm_fn, urls: dict, cache: dict, model: str,
-                    retry_chunks: list = None, n_votes: int = 1) -> tuple:
+                    retry_chunks: list = None, n_votes: int = 1, requery_fn=None) -> tuple:
     """One submission row, plus whether the wider retry was used.
 
     If the deterministic first vote finds no answer in the top excerpts, every vote uses the wider set
@@ -267,6 +293,12 @@ def answer_question(q: dict, chunks: list, llm_fn, urls: dict, cache: dict, mode
     if retry_chunks and len(retry_chunks) > len(chunks) and (not reply or not reply.get("answerable", True)):
         used, retried = retry_chunks, True
         reply = ask(q, retry_chunks, llm_fn, cache, model)
+    if requery_fn and (not reply or not reply.get("answerable", True)):
+        # Still no answer: search again with rephrased queries before giving up.
+        alt = requery_fn(q["question"], search_queries(q["question"], llm_fn, cache, model))
+        if alt:
+            used, retried = alt, True
+            reply = ask(q, alt, llm_fn, cache, model)
     fallback = [c["doc_id"] for c in used]
     make = lambda rep: to_row(q["id"], q["question"], q.get("answer_unit"), rep, urls, set(urls), fallback)
     rows = [make(reply)] + [make(ask(q, used, llm_fn, cache, model, vote=v)) for v in range(1, n_votes)]

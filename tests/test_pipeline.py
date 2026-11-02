@@ -341,3 +341,49 @@ def test_rate_limit_waits_and_retries(monkeypatch):
     monkeypatch.setattr("requests.post", lambda *a, **k: R(400))
     with pytest.raises(RuntimeError, match="HTTP 400"):
         L.make_databricks_llm("m", host="h", token="t")([])  # not retried
+
+
+def test_weighted_fusion_and_per_document_cap():
+    chunks = [{"chunk_id": f"a{i}", "doc_id": "a2020", "page": 1, "text": "gshard emissions tco2e",
+               "search_text": "a2020 gshard emissions tco2e"} for i in range(5)]
+    chunks.append({"chunk_id": "b0", "doc_id": "b2021", "page": 1, "text": "gshard energy",
+                   "search_text": "b2021 gshard energy"})
+    r = Retriever(chunks, {})
+    assert [c["doc_id"] for c in r.search("gshard emissions", k=3)] == ["a2020"] * 3
+    assert {c["doc_id"] for c in r.search("gshard emissions", k=3, max_per_doc=2)} == {"a2020", "b2021"}
+    r.configure(max_per_doc=1)
+    assert len(r.search("gshard emissions", k=3)) == 2  # only two documents exist
+
+
+def test_tune_reports_recall_per_setting():
+    from wattbot.retrieve import tune
+    from wattbot.score import parse_refs
+    qs = pd.DataFrame([{"question": "GShard emissions?", "answer_value": "4.3", "ref_id": "['patterson2021']",
+                        "CrossPaper": 0}])
+    out = tune(Retriever(_chunks(), {}), qs, k=1, grid=[{"max_per_doc": None}, {"max_per_doc": 1}], parse_refs=parse_refs)
+    assert list(out["recall"]) == [1.0, 1.0]
+
+
+def test_rephrased_search_before_refusing():
+    from wattbot.answer import answer_question
+    calls = []
+    def llm(messages, temperature=0.0):
+        content = messages[0]["content"]
+        calls.append(content[:20])
+        if "keyword search queries" in content:
+            return '["household electricity kWh per year"]'
+        if "10715" in content:
+            return json.dumps({"answerable": True, "answer": "1.3", "answer_value": "1.3",
+                               "ref_ids": ["strubell2019"], "supporting_materials": "q", "explanation": "e"})
+        return json.dumps({"answerable": False})
+    found = [{"chunk_id": "s1", "doc_id": "strubell2019", "page": 2, "text": "household uses 10715 kWh per year"}]
+    requery = lambda question, queries: found if queries else []
+    row, retried = answer_question({"id": "q", "question": "household-years?", "answer_unit": "household-years"},
+                                   [{"chunk_id": "x", "doc_id": "dodge2022", "page": 1, "text": "irrelevant"}],
+                                   llm, URLS, {}, "m", requery_fn=requery)
+    assert retried and row["answer_value"] == "1.3"
+
+
+def test_reasoning_requested_before_value():
+    content = build_messages("How long?", "days", [])[0]["content"]
+    assert content.index('"explanation"') < content.index('"answer_value": "..."')
